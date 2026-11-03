@@ -147,6 +147,11 @@ class BlueIrisApi:
         # Groups/system/special views often don't have isOnline
         if cam_type in (BI_CAMERA_TYPE_GROUP, BI_CAMERA_TYPE_SYSTEM):
             return bool(c.get(BI_ATTR_IS_ENABLED, False))
+        # kmb-patch: a Blue Iris cycle view ("@Name") has neither a `group` list nor `isOnline`,
+        # and Blue Iris offers no setting that adds them, so it was always treated as offline.
+        # Follow `isEnabled` for those entries only.
+        if str(c.get(BI_ATTR_ID, "")).startswith("@") and BI_ATTR_IS_ONLINE not in c:
+            return bool(c.get(BI_ATTR_IS_ENABLED, False))
         return bool(c.get(BI_ATTR_IS_ONLINE, False))
 
     @staticmethod

@@ -29,6 +29,12 @@ from .helpers.const import (
 _LOGGER = logging.getLogger(__name__)
 ALLOWED_COMPLEX_KEYS: Final[set[str]] = {"group", "rects"}
 
+# kmb-patch: rate at which Home Assistant polls the still image to build the MJPEG stream shown
+# on dashboards. Camera.frame_interval defaults to 0.5 s (2 fps), which makes a Blue Iris view
+# look like a slideshow. Polling faster than the source costs only a fetch: HA skips unchanged
+# frames, and polling only happens while a client is watching.
+MIN_POLL_FPS: Final[int] = 10
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities) -> None:
     """Create camera entities for the cameras allowed by the current options."""
@@ -72,6 +78,11 @@ class BlueIrisCamera(CoordinatorEntity[BlueIrisData], Camera):
         if not data:
             return None
         return data.cameras.get(self.camera_id)
+
+    @property
+    def frame_interval(self) -> float:
+        """kmb-patch: seconds between polls of the still image for the MJPEG stream."""
+        return 1 / MIN_POLL_FPS
 
     @property
     def name(self) -> str | None:
