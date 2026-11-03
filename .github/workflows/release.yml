@@ -1,0 +1,57 @@
+name: Release
+
+# This repository is a READ-ONLY MIRROR of the primary repo on a private forge (Gitea). Never push, tag or edit anything
+# here: the mirror force-syncs from the primary and prunes refs that exist only on GitHub.
+#
+# A release is a tag created on the primary by the weekly upstream sync (<upstream version>.<n>, e.g. 2026.10.29.1) and carried
+# here by the mirror. HACS reads GitHub Releases, so this workflow creates the Release for the mirrored tag. It commits,
+# pushes and tags nothing. hacs.json has no zip_release, so there is no asset to build.
+# workflow_dispatch is a dry run: it prints what it would publish and publishes nothing.
+
+on:
+  push:
+    tags: ['[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Work out the tag and notes
+        run: |
+          set -euo pipefail
+          if jq -e '.zip_release // false' hacs.json >/dev/null; then
+            echo "::error::hacs.json sets zip_release, but this workflow builds no zip asset"; exit 1
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG=$(git tag -l '[0-9]*' --sort=-v:refname | head -1)
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          [[ "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::tag '$TAG' is not <upstream x.y.z>.<n>"; exit 1; }
+          UP="${TAG%.*}"
+          { echo "TAG=$TAG"; echo "UP=$UP"; } >> "$GITHUB_ENV"
+          {
+            echo "Upstream release [$UP](https://github.com/kramttocs/ha-blueiris/releases/tag/$UP) plus the local patches described in PATCHES.md."
+          } > /tmp/notes.md
+          echo "---- notes for $TAG ----"; cat /tmp/notes.md
+
+      - name: Publish the GitHub Release
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "Release $TAG already exists."; exit 0; fi
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file /tmp/notes.md --latest

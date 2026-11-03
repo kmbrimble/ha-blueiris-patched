@@ -1,0 +1,89 @@
+name: Upstream sync
+
+# Weekly: merge the newest kramttocs/ha-blueiris release tag, test it, push main and tag a release.
+# The tag reaches GitHub through the push mirror, where .github/workflows/release.yml publishes the
+# GitHub Release that HACS reads. A merge conflict or failed test leaves main untouched and opens an issue.
+
+on:
+  schedule:
+    - cron: "17 19 * * 0" # Monday 05:17 Brisbane time
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Merge and test only; push nothing (a branch probe still checks push access)"
+        type: boolean
+        default: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Merge the newest upstream release
+        id: sync
+        run: |
+          git config user.name "upstream-sync"
+          git config user.email "upstream-sync@users.noreply.git.kiztigs.com"
+          git fetch --tags origin
+          scripts/upstream_sync.sh
+
+      - name: Test the merged tree
+        if: steps.sync.outputs.changed == 'true' && steps.sync.outputs.conflict != 'true'
+        run: |
+          python3 -m compileall -q custom_components
+          python3 -m unittest discover tests -v
+
+      - name: Dry run - check push access with a throwaway branch
+        if: github.event.inputs.dry_run == 'true'
+        run: |
+          git push origin HEAD:refs/heads/ci/push-probe
+          git push origin --delete ci/push-probe
+
+      - name: Fast-forward main and tag the release
+        if: >-
+          steps.sync.outputs.changed == 'true' && steps.sync.outputs.conflict != 'true' &&
+          github.event.inputs.dry_run != 'true'
+        run: |
+          branch="${{ steps.sync.outputs.branch }}"
+          up="${{ steps.sync.outputs.upstream_tag }}"
+          git checkout -q main
+          git merge --ff-only "$branch"
+          git push origin main
+          n=$(git tag -l "${up}.*" | wc -l)
+          tag="${up}.$((n + 1))"
+          git tag "$tag"
+          git push origin "$tag"
+          echo "Tagged $tag; the mirror carries it to GitHub, which publishes the release."
+
+      - name: Open or update the attention issue
+        if: failure() || steps.sync.outputs.conflict == 'true'
+        env:
+          TOKEN: ${{ github.token }}
+          API: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          UP_TAG: ${{ steps.sync.outputs.upstream_tag }}
+          CONFLICT: ${{ steps.sync.outputs.conflict }}
+          FILES: ${{ steps.sync.outputs.conflict_files }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          title = "Upstream sync needs attention"
+          body = (f"Run: {os.environ['RUN_URL']}\nUpstream release: {os.environ.get('UP_TAG','?')}\n"
+                  f"Merge conflict: {os.environ.get('CONFLICT','')} {os.environ.get('FILES','')}\n\n"
+                  "main is untouched. Resolve by hand (see PATCHES.md), then re-run the workflow.")
+          api, repo = os.environ["API"], os.environ["REPO"]
+          def call(method, path, data=None):
+              req = urllib.request.Request(f"{api}/repos/{repo}{path}", method=method,
+                  data=json.dumps(data).encode() if data is not None else None,
+                  headers={"Authorization": "token " + os.environ["TOKEN"], "Content-Type": "application/json"})
+              return json.load(urllib.request.urlopen(req, timeout=20))
+          open_issues = call("GET", "/issues?state=open&type=issues&limit=50")
+          hit = next((i for i in open_issues if i["title"] == title), None)
+          if hit: call("POST", f"/issues/{hit['number']}/comments", {"body": body})
+          else: call("POST", "/issues", {"title": title, "body": body})
+          PY
